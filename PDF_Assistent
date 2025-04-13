@@ -1,0 +1,86 @@
+import os
+import requests
+from dotenv import load_dotenv
+from typing import List, Optional
+import typer
+from langchain.chains import ConversationalRetrievalChain
+from langchain_groq import ChatGroq
+from langchain.vectorstores import FAISS
+from langchain.document_loaders import OnlinePDFLoader, PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings.sentence_transformer import SentenceTransformerEmbeddings
+
+# Warm-up to avoid HTTPS issues
+session = requests.Session()
+session.request("GET", "https://cdn-lfs.hf.co", timeout=30)
+
+# Load environment variables
+load_dotenv()
+groq_api_key = os.getenv("GROQ_API_KEY")
+if not groq_api_key:
+    raise ValueError("GROQ_API_KEY is missing. Please check your .env file.")
+os.environ["GROQ_API_KEY"] = groq_api_key
+
+
+def load_pdf_knowledge(pdf_urls: List[str] = None, local_pdf: str = None):
+    docs = []
+    if pdf_urls:
+        for url in pdf_urls:
+            try:
+                loader = OnlinePDFLoader(url)
+                docs.extend(loader.load())
+            except Exception as e:
+                print(f"Failed to load online PDF {url}: {e}")
+
+    if local_pdf:
+        try:
+            loader = PyPDFLoader(local_pdf)
+            docs.extend(loader.load())
+        except Exception as e:
+            print(f"Failed to load local PDF {local_pdf}: {e}")
+
+    if not docs:
+        raise ValueError("No valid PDFs loaded.")
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    texts = text_splitter.split_documents(docs)
+
+    vector_db = FAISS.from_documents(texts, SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"))
+    return vector_db
+
+
+# Load your PDFs
+pdf_urls = ["https://phi-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf"]
+local_pdf_path = r"D:\Projects\Agentic AI\Document\NewgenONE 2024.2 Business Workspace Administration Guide.pdf"
+
+vector_store = load_pdf_knowledge(pdf_urls=pdf_urls, local_pdf=local_pdf_path)
+retriever = vector_store.as_retriever()
+
+llm = ChatGroq(model_name="llama3-8b-8192", temperature=0)
+assistant_chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever)
+
+
+def pdf_assistant(new: bool = False, user: str = "user"):
+    chat_history = []
+    print("Assistant Ready! Type 'exit' to stop.\n")
+
+    while True:
+        query = input("Ask a question: ")
+        if query.lower() == "exit":
+            print("Thank you very much!")
+            break
+
+        formatted_chat_history = [(entry['question'], entry['answer']) for entry in chat_history]
+
+        response = assistant_chain.invoke({
+            "question": query,
+            "chat_history": formatted_chat_history
+        })
+
+        print("\nAssistant:", response["answer"])
+        chat_history.append({"question": query, "answer": response["answer"]})
+
+
+
+if __name__ == "__main__":
+    typer.run(pdf_assistant)
